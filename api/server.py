@@ -1,7 +1,10 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
+import time
+from collections import defaultdict
 
 
 app = FastAPI()
@@ -16,29 +19,40 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-class RateLimiter:
-    def __init__(self):
-        self.requests = 0
 
-    async def __call__(self, request: Request):
-        if request.method == "POST":
-            if self.requests < 10:
-                self.requests += 1
-                return await next(self)
-            else:
-                return JSONResponse({"error": "Rate limit exceeded"}, status_code=429)
+class RateLimiterMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, limit: int = 10, window: int = 60):
+        super().__init__(app)
+        self.limit = limit
+        self.window = window
+        self.requests = defaultdict(list)
 
-app.middleware("http", RateLimiter())
+    async def dispatch(self, request: Request, call_next):
+        now = time.time()
+        key = request.client.host if request.client else "unknown"
+        timestamps = self.requests[key]
+        # Remove timestamps outside the window
+        timestamps[:] = [ts for ts in timestamps if now - ts < self.window]
+        if len(timestamps) >= self.limit:
+            return JSONResponse({
+                "error": "Rate limit exceeded",
+                "status_code": 429
+            }, status_code=429)
+        timestamps.append(now)
+        response = await call_next(request)
+        return response
 
 
-# Sample route
-@app.get("/")
-async def root():
-    return {"message": "Hello from FastAPI"}
+app.add_middleware(RateLimiterMiddleware)
 
 
 class DemoPostData(BaseModel):
     data: str
+
+
+@app.get("/")
+async def root():
+    return {"message": "Hello from FastAPI"}
 
 
 @app.post("/demo_post")
